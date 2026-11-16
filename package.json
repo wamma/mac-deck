@@ -1,0 +1,8 @@
+{
+  "name": "mac-deck",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local browser-based Mac control panel",
+  "devDependencies": {"playwright": "1.65.1"},
+  "scripts": {"test:browser": "node scripts/verify_public_ui.mjs artifacts/public-ui"}
+}

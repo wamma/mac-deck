@@ -1,0 +1,47 @@
+// Real Claude hook -> provider -> UI registration -> authenticated detail capture. No reply keys.
+import assert from 'node:assert/strict';import {execFileSync} from 'node:child_process';
+import {readFile,writeFile,mkdir,mkdtemp,unlink} from 'node:fs/promises';import {tmpdir} from 'node:os';import {join,resolve} from 'node:path';import {randomUUID,createHash} from 'node:crypto';
+const {webkit}=await import(process.env.PLAYWRIGHT_MODULE||'playwright');
+const folder=process.argv[2],code=process.env.DECK_CODE,root=(process.env.DECK_TEST_URL||'http://127.0.0.1:8765');if(!folder||!code)throw Error('Folder and DECK_CODE required');
+const id=randomUUID(),session='claude:'+id,marker='DECK CAPTURE TEST '+id.slice(-8),directory=await mkdtemp(join(tmpdir(),'deck-claude-window-')),bridgePath=resolve('.deck-data/claude-events',createHash('sha256').update(id).digest('hex')+'.json');
+const browser=await webkit.launch(),context=await browser.newContext({viewport:{width:1366,height:1024}}),page=await context.newPage();
+const evidence={plannedSessionSuffix:id.slice(-8),marker,launches:0,userMessages:0,modelRequests:0,replyRequests:0,screenshots:[]};let before,slot,windowId,tty,initial,failure,settings;
+page.on('request',request=>{if(new URL(request.url()).pathname==='/api/ai/reply')evidence.replyRequests++;});
+function python(source,args=[]){return JSON.parse(execFileSync('python3',['-c',source,...args],{encoding:'utf8'}));}
+function osa(source,args=[]){return execFileSync('/usr/bin/osascript',['-e',source,...args],{encoding:'utf8',timeout:20000}).trim();}
+async function get(path){const r=await context.request.get(root+path);assert.equal(r.status(),200);return r.json();}
+async function post(path,data){const r=await context.request.post(root+path,{data,headers:{Origin:root}});assert.equal(r.status(),200);return r.json();}
+async function until(fn,seconds=10){const deadline=Date.now()+seconds*1000;while(Date.now()<deadline){const value=await fn();if(value)return value;await new Promise(r=>setTimeout(r,75));}throw Error('Observation deadline at '+evidence.stage);}
+async function json(path){try{return JSON.parse(await readFile(path,'utf8'));}catch(e){if(e.code==='ENOENT')return null;throw e;}}
+async function refresh(){await page.waitForFunction(()=>!refreshBusy);await page.evaluate(()=>refresh());}
+async function shot(bytes,label){const path=join(folder,`macOS_${label}_${Date.now()}.png`);await writeFile(path,bytes);evidence.screenshots.push({path,width:bytes.readUInt32BE(16),height:bytes.readUInt32BE(20),sha256:createHash('sha256').update(bytes).digest('hex')});}
+try{
+ evidence.stage='browser/auth/slot preparation';await mkdir(folder,{recursive:true});settings=await readFile('.claude/settings.local.json');await post('/api/pair',{code});before=await get('/api/state');slot=before.ai.slots.findIndex(s=>s.id==null);assert.ok(slot>=0);evidence.slotNumber=slot+1;
+ initial=await get('/api/diagnostics');evidence.originalForeground={pid:initial.pid,bundleId:initial.bundleId};assert.ok(initial.accessibilityTrusted&&initial.screenCaptureGranted);assert.notEqual(initial.bundleId,'com.apple.loginwindow');
+ await page.goto(root);await page.locator('#dashboard').waitFor({state:'visible'});await page.locator('[data-mode=ai]').click();await page.waitForFunction(()=>!refreshBusy);evidence.browserReadyAt=Date.now()/1000;
+ // The new Terminal runs only our waiting runner until the browser explicitly releases go.
+ const control=join(directory,'control.json');await writeFile(control,JSON.stringify({id,marker,cwd:process.cwd(),claude:execFileSync('/usr/bin/which',['claude'],{encoding:'utf8'}).trim()}),{mode:0o600});
+ evidence.stage='dedicated Terminal creation';
+ const result=osa('on run argv\n tell application "Terminal"\n set t to do script ("exec /usr/bin/python3 " & quoted form of (item 1 of argv) & " " & quoted form of (item 2 of argv))\n set custom title of t to item 3 of argv\n activate\n return (id of front window as text) & "|" & tty of t\n end tell\nend run',[resolve('scripts/claude_terminal_trial.py'),control,marker]);
+ [windowId,tty]=result.split('|');windowId=Number(windowId);assert.ok(windowId>0&&tty.startsWith('/dev/ttys'));const ready=await until(()=>json(join(directory,'ready.json')));assert.equal(ready.tty,tty);evidence.terminal={windowId,tty,runnerPid:ready.pid};
+ evidence.stage='single real Claude launch';await writeFile(join(directory,'go'),'');evidence.launches=1;
+ const start=await until(async()=>{const d=await json(bridgePath);return d?.session===id&&d.state==='idle'?d:null;},20);evidence.sessionSuffix=id.slice(-8);evidence.bridge={state:start.state,updatedAt:start.updatedAt,processPresent:!!start.process};assert.ok(start.process,'Actual bridge supplied no process/TTY evidence');assert.equal(start.process.tty,tty);
+ const child=await json(join(directory,'child.json'));assert.equal(start.process.pid,child.pid);const fingerprint=execFileSync('/bin/ps',['-p',String(child.pid),'-o','lstart=,tty=,comm='],{encoding:'utf8'}).trim();assert.equal(start.process.fingerprint,fingerprint);evidence.bridge.process={pid:child.pid,tty,fingerprintMatches:true};
+ evidence.stage='provider source and UI registration';await until(async()=>(await get('/api/state')).ai.sources.some(s=>s.id===session));await refresh();await page.locator('#slots .slot').nth(slot).click();await page.locator('#ai-source').selectOption(session);await page.locator('#ai-register').click();await page.locator('#ai-dialog').waitFor({state:'hidden'});await page.locator('#slots .slot').nth(slot).click();assert.equal(await page.locator('#slots .slot').nth(slot).getAttribute('data-state'),'idle');
+ evidence.stage='foreground/TTY/title cross-check';const title=osa('on run argv\n tell application "Terminal"\n set w to window id (item 1 of argv as integer)\n if tty of selected tab of w is not item 2 of argv then error "TTY changed"\n set index of w to 1\n activate\n return custom title of selected tab of w\n end tell\nend run',[String(windowId),tty]);assert.equal(title,marker);
+ const diagnostic=await get('/api/diagnostics');assert.equal(diagnostic.bundleId,'com.apple.Terminal');assert.equal(diagnostic.windowId,windowId);assert.ok(diagnostic.windowTitle.includes(marker));evidence.terminal.foregroundPid=diagnostic.pid;evidence.terminal.markerTitleMatches=true;
+ evidence.stage='authenticated product detail capture';const response=page.waitForResponse(r=>new URL(r.url()).pathname==='/api/ai/detail');await page.locator('#ai-capture').click();const r=await response,detail=await r.json();evidence.detailStatus=r.status();if(r.status()!==200)throw Error(detail.error||'Detail failed');
+ assert.equal(detail.id,session);assert.equal(detail.state,'idle');assert.equal(detail.mapping.windowId,windowId);assert.equal(detail.mapping.terminalProcess.pid,child.pid);assert.equal(detail.mapping.terminalProcess.tty,tty);assert.equal(detail.mapping.sessionId,id);
+ const proof=await json(detail.mapping.sessionProofPath);assert.equal(proof.session,id);assert.ok(Date.now()/1000-proof.updatedAt<30);evidence.detail={state:detail.state,windowId:detail.mapping.windowId,processPid:child.pid,tty,sameSession:true,proofFresh:true,capturedAt:detail.capturedAt,elapsedFromStartSeconds:Date.now()/1000-start.updatedAt};
+ await page.locator('#ai-image').waitFor({state:'visible'});assert.equal(await page.locator('[data-reply]:enabled').count(),0);assert.equal(evidence.replyRequests,0);evidence.idleRepliesDisabled=true;
+ await shot(Buffer.from(detail.image.split(',')[1],'base64'),'Terminal_actual_registered_detail');await shot(await page.screenshot({fullPage:true}),'WebKit_iPad-size_actual_Claude_detail');evidence.result='PASS';
+}catch(error){failure=error;evidence.result='BLOCKED';evidence.error=error.message.replaceAll(id,'[session:'+id.slice(-8)+']');}
+finally{
+ await writeFile(join(directory,'stop'),'');const ended=evidence.launches?await until(()=>json(join(directory,'ended.json')),15).catch(()=>null):null;if(ended)evidence.cliEnded=ended;
+ if(before&&slot>=0){await post('/api/ai/register',{slot,session:before.ai.slots[slot].id});const after=await get('/api/state');assert.deepEqual(after.ai.slots.map(s=>s.id),before.ai.slots.map(s=>s.id));assert.deepEqual(after.buttons,before.buttons);assert.deepEqual(after.preferences,before.preferences);evidence.slotsButtonsPreferencesRestored=true;}
+ if(windowId){try{osa('on run argv\n tell application "Terminal"\n set w to window id (item 1 of argv as integer)\n if tty of selected tab of w is not item 2 of argv then error "TTY changed; not closing"\n if custom title of selected tab of w is not item 3 of argv then error "Marker changed; not closing"\n close w\n end tell\nend run',[String(windowId),tty,marker]);evidence.testWindowClosed=true;}catch{evidence.testWindowClosed=false;}}
+ if(initial){execFileSync('/usr/bin/open',['-b',initial.bundleId]);const d=await get('/api/diagnostics');evidence.foregroundRestored=d.pid===initial.pid&&d.bundleId===initial.bundleId;}
+ if(settings){assert.deepEqual(await readFile('.claude/settings.local.json'),settings);evidence.settingsUnchanged=true;}
+ await unlink(join(directory,'control.json')).catch(()=>{});await browser.close();await writeFile('artifacts/phase4-8-evidence.json',JSON.stringify(evidence,null,2)+'\n');
+}
+console.log(JSON.stringify({result:evidence.result,stage:evidence.stage,error:evidence.error,launches:evidence.launches,detail:evidence.detail,ended:evidence.cliEnded?.exitCode,restored:evidence.slotsButtonsPreferencesRestored}));if(failure)process.exitCode=1;

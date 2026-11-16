@@ -81,4 +81,4 @@ npm run test:browser
 
 Tests use temporary fixtures and ports; see [verification](docs/verification.md) before any optional live Mac test. Do not run live test scripts against a working user's server. `PLAYWRIGHT_MODULE`, `CHROME_PATH`, `DECK_TEST_URL` and explicit output directories replace machine-specific paths. Private artifacts belong in ignored `artifacts/`, never in tracked docs.
 
-The release candidate has no remote and no imported private history. Security controls reduce specific risks; they do not constitute a security audit or guarantee. See [security boundaries](docs/security.md). **A public license has not been selected.** The repository owner must decide licensing before publication; no license is implicitly granted by this preparation.
+This distribution starts from a new Git root with no imported private history. Security controls reduce specific risks; they do not constitute a security audit or guarantee. See [security boundaries](docs/security.md). **A public license has not been selected.** No additional reuse license is granted. The owner may add a license later.

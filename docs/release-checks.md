@@ -22,7 +22,7 @@ No operational server, user clipboard/app, provider session or external project 
 
 ## Still unverified / owner decisions
 
-- Choose a license before publication; preparation does not select one.
+- No reuse license is selected; source publication does not add one. The owner may choose a license later.
 - Physical iPad/Galaxy/Samsung Internet certificate trust, LAN reachability and IME behavior.
 - Actual Claude usage delivery; actual AI terminal/window capture and approval response under the required permissions.
 - Real supported-display brightness and OS capture selection; actual battery savings are not claimed.
